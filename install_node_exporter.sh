@@ -54,10 +54,12 @@ if systemctl is-active --quiet node_exporter 2>/dev/null; then
         if [ "$CURRENT_VERSION" = "$NODE_EXPORTER_VERSION" ]; then
             log "Версия совпадает, пропускаем установку Node Exporter"
             log "Продолжаем установку агента мониторинга..."
+            SKIP_NODE_EXPORTER_INSTALL=true
         else
             log "Версии отличаются, обновляем до v${NODE_EXPORTER_VERSION}"
             log "Останавливаем текущую версию..."
             systemctl stop node_exporter
+            SKIP_NODE_EXPORTER_INSTALL=false
         fi
     else
         log "Node Exporter запущен, но версия неизвестна, обновляем..."
@@ -147,31 +149,36 @@ else
     log "Пользователь ${NODE_EXPORTER_USER} уже существует"
 fi
 
-# Скачивание Node Exporter
-log "Скачивание Node Exporter..."
-log "URL: ${NODE_EXPORTER_URL}"
-cd /tmp
-if [ -f "node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz" ]; then
-    log "Файл уже скачан"
-else
-    wget "${NODE_EXPORTER_URL}"
-    if [ $? -eq 0 ]; then
-        log "Node Exporter v${NODE_EXPORTER_VERSION} успешно скачан"
+# Установка Node Exporter (если нужно)
+if [ "$SKIP_NODE_EXPORTER_INSTALL" != "true" ]; then
+    # Скачивание Node Exporter
+    log "Скачивание Node Exporter..."
+    log "URL: ${NODE_EXPORTER_URL}"
+    cd /tmp
+    if [ -f "node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz" ]; then
+        log "Файл уже скачан"
     else
-        error "Ошибка скачивания Node Exporter"
-        exit 1
+        wget "${NODE_EXPORTER_URL}"
+        if [ $? -eq 0 ]; then
+            log "Node Exporter v${NODE_EXPORTER_VERSION} успешно скачан"
+        else
+            error "Ошибка скачивания Node Exporter"
+            exit 1
+        fi
     fi
+
+    # Распаковка архива
+    log "Распаковка архива..."
+    tar xzf "node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz"
+
+    # Установка бинарного файла
+    log "Установка бинарного файла..."
+    cp "node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64/node_exporter" "$NODE_EXPORTER_BIN"
+    chown "$NODE_EXPORTER_USER:$NODE_EXPORTER_GROUP" "$NODE_EXPORTER_BIN"
+    chmod +x "$NODE_EXPORTER_BIN"
+else
+    log "Пропуск установки Node Exporter (версия совпадает)"
 fi
-
-# Распаковка архива
-log "Распаковка архива..."
-tar xzf "node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz"
-
-# Установка бинарного файла
-log "Установка бинарного файла..."
-cp "node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64/node_exporter" "$NODE_EXPORTER_BIN"
-chown "$NODE_EXPORTER_USER:$NODE_EXPORTER_GROUP" "$NODE_EXPORTER_BIN"
-chmod +x "$NODE_EXPORTER_BIN"
 
 # Создание systemd сервиса
 log "Создание systemd сервиса..."
