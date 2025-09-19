@@ -283,14 +283,6 @@ echo "• IP сервера: $(hostname -I | awk '{print $1}')"
 echo "• Порт: 9100"
 echo "• URL: http://$(hostname -I | awk '{print $1}'):9100/metrics"
 echo ""
-# Показываем предупреждение только если порт закрыт
-if [[ "$FIREWALL_STATUS" == *"закрыт"* ]] || [[ "$FIREWALL_STATUS" == "файрвол не найден" ]]; then
-    echo -e "${YELLOW}⚠️  ВАЖНО: Откройте порт 9100 в файрволе!${NC}"
-    echo "• UFW: ufw allow 9100/tcp"
-    echo "• iptables: iptables -A INPUT -p tcp --dport 9100 -j ACCEPT"
-    echo "• Или откройте порт в панели управления сервером"
-else
-    echo -e "${GREEN}✅ Порт 9100 уже открыт в файрволе!${NC}"
-fi
+echo -e "${YELLOW}⚠️  ВАЖНО: Порт 9100 должен быть открыт для бота!${NC}"
 echo ""
 echo -e "${GREEN}Node Exporter готов к работе!${NC}"
