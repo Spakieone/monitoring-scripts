@@ -254,6 +254,306 @@ log "Очистка временных файлов..."
 rm -rf /tmp/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64*
 rm -f /tmp/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz
 
+# Установка агента мониторинга
+log "Установка агента мониторинга..."
+MONITORING_AGENT_DIR="/opt/monitoring_agent"
+
+# Создаем директорию для агента
+mkdir -p "$MONITORING_AGENT_DIR"
+
+# Запрос настроек агента мониторинга
+echo ""
+echo -e "${BLUE}Настройка агента мониторинга:${NC}"
+echo "Введите URL вашего бота (например: http://93.188.206.70:8080)"
+read -p "URL бота: " BOT_URL
+
+# Проверяем URL
+if [ -z "$BOT_URL" ]; then
+    BOT_URL="http://your-bot-server.com"
+    warn "URL бота не указан, используется по умолчанию: $BOT_URL"
+fi
+
+# Автоматически определяем имя сервера
+AUTO_SERVER_NAME=$(hostname)
+echo "Введите имя сервера (по умолчанию: $AUTO_SERVER_NAME)"
+read -p "Имя сервера: " SERVER_NAME
+
+# Проверяем имя сервера
+if [ -z "$SERVER_NAME" ]; then
+    SERVER_NAME="$AUTO_SERVER_NAME"
+    log "Используется автоматически определенное имя: $SERVER_NAME"
+fi
+
+log "Настройки агента:"
+log "• URL бота: $BOT_URL"
+log "• Имя сервера: $SERVER_NAME"
+
+# Создаем агент мониторинга
+log "Создание агента мониторинга..."
+cat > "$MONITORING_AGENT_DIR/monitoring_agent.py" << EOF
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+
+"""
+Агент мониторинга для VPN серверов
+Собирает метрики с Node Exporter и RemnaNode
+"""
+
+import asyncio
+import aiohttp
+import json
+import os
+import subprocess
+import time
+from datetime import datetime
+from typing import Dict, Any, Optional
+
+class MonitoringAgent:
+    def __init__(self, bot_url: str, server_name: str):
+        self.bot_url = bot_url
+        self.server_name = server_name
+        self.node_exporter_url = "http://localhost:9100"
+        self.remnanode_log_path = "/var/log/remnanode"
+        self.session = None
+        
+    async def start(self):
+        """Запуск агента мониторинга"""
+        self.session = aiohttp.ClientSession()
+        print(f"[{datetime.now()}] Агент мониторинга запущен для {self.server_name}")
+        
+        while True:
+            try:
+                await self.collect_and_send_metrics()
+                await asyncio.sleep(30)  # Отправляем каждые 30 секунд
+            except Exception as e:
+                print(f"[{datetime.now()}] Ошибка: {e}")
+                await asyncio.sleep(10)
+    
+    async def collect_and_send_metrics(self):
+        """Сбор и отправка метрик"""
+        metrics = {
+            "server_name": self.server_name,
+            "timestamp": datetime.now().isoformat(),
+            "node_exporter": await self.get_node_exporter_metrics(),
+            "remnanode": await self.get_remnanode_metrics(),
+            "system": await self.get_system_metrics()
+        }
+        
+        await self.send_metrics(metrics)
+    
+    async def get_node_exporter_metrics(self) -> Dict[str, Any]:
+        """Получение метрик от Node Exporter"""
+        try:
+            async with self.session.get(f"{self.node_exporter_url}/metrics") as response:
+                if response.status == 200:
+                    text = await response.text()
+                    return self.parse_prometheus_metrics(text)
+        except Exception as e:
+            print(f"Ошибка получения метрик Node Exporter: {e}")
+        
+        return {"status": "error", "message": "Node Exporter недоступен"}
+    
+    def parse_prometheus_metrics(self, text: str) -> Dict[str, Any]:
+        """Парсинг метрик Prometheus"""
+        metrics = {}
+        lines = text.split('\n')
+        
+        for line in lines:
+            if line.startswith('#') or not line.strip():
+                continue
+                
+            if ' ' in line:
+                name, value = line.rsplit(' ', 1)
+                try:
+                    metrics[name] = float(value)
+                except ValueError:
+                    metrics[name] = value
+        
+        # Извлекаем ключевые метрики
+        return {
+            "cpu_usage": metrics.get("node_cpu_seconds_total", 0),
+            "memory_total": metrics.get("node_memory_MemTotal_bytes", 0),
+            "memory_available": metrics.get("node_memory_MemAvailable_bytes", 0),
+            "disk_total": metrics.get("node_filesystem_size_bytes", 0),
+            "disk_free": metrics.get("node_filesystem_free_bytes", 0),
+            "network_rx": metrics.get("node_network_receive_bytes_total", 0),
+            "network_tx": metrics.get("node_network_transmit_bytes_total", 0),
+            "load_1m": metrics.get("node_load1", 0),
+            "load_5m": metrics.get("node_load5", 0),
+            "load_15m": metrics.get("node_load15", 0),
+            "status": "ok"
+        }
+    
+    async def get_remnanode_metrics(self) -> Dict[str, Any]:
+        """Получение метрик RemnaNode"""
+        try:
+            # Проверяем статус Docker контейнера
+            result = subprocess.run(
+                ["docker", "inspect", "remnanode", "--format", "{{.State.Status}}"],
+                capture_output=True, text=True, timeout=5
+            )
+            
+            container_status = result.stdout.strip() if result.returncode == 0 else "unknown"
+            
+            # Получаем использование ресурсов
+            result = subprocess.run(
+                ["docker", "stats", "remnanode", "--no-stream", "--format", 
+                 "{{.CPUPerc}},{{.MemUsage}},{{.NetIO}},{{.BlockIO}}"],
+                capture_output=True, text=True, timeout=5
+            )
+            
+            stats = result.stdout.strip().split(',') if result.returncode == 0 else []
+            
+            # Анализируем логи
+            log_metrics = await self.analyze_remnanode_logs()
+            
+            return {
+                "status": container_status,
+                "cpu_percent": stats[0] if len(stats) > 0 else "0%",
+                "memory_usage": stats[1] if len(stats) > 1 else "0B / 0B",
+                "network_io": stats[2] if len(stats) > 2 else "0B / 0B",
+                "block_io": stats[3] if len(stats) > 3 else "0B / 0B",
+                "log_metrics": log_metrics
+            }
+            
+        except Exception as e:
+            print(f"Ошибка получения метрик RemnaNode: {e}")
+            return {"status": "error", "message": str(e)}
+    
+    async def analyze_remnanode_logs(self) -> Dict[str, Any]:
+        """Анализ логов RemnaNode"""
+        try:
+            # Читаем последние 100 строк лога
+            result = subprocess.run(
+                ["tail", "-100", f"{self.remnanode_log_path}/access.log"],
+                capture_output=True, text=True, timeout=5
+            )
+            
+            if result.returncode == 0:
+                lines = result.stdout.split('\n')
+                return {
+                    "total_lines": len(lines),
+                    "recent_connections": len([l for l in lines if 'connect' in l.lower()]),
+                    "recent_errors": len([l for l in lines if 'error' in l.lower()]),
+                    "last_activity": lines[-1] if lines else "no_activity"
+                }
+        except Exception as e:
+            print(f"Ошибка анализа логов: {e}")
+        
+        return {"status": "error", "message": "Логи недоступны"}
+    
+    async def get_system_metrics(self) -> Dict[str, Any]:
+        """Получение системных метрик"""
+        try:
+            # Uptime
+            with open('/proc/uptime', 'r') as f:
+                uptime_seconds = float(f.read().split()[0])
+            
+            # Количество процессов
+            result = subprocess.run(["ps", "aux"], capture_output=True, text=True)
+            process_count = len(result.stdout.split('\n')) - 1
+            
+            return {
+                "uptime_seconds": uptime_seconds,
+                "process_count": process_count,
+                "timestamp": datetime.now().isoformat()
+            }
+        except Exception as e:
+            return {"status": "error", "message": str(e)}
+    
+    async def send_metrics(self, metrics: Dict[str, Any]):
+        """Отправка метрик в бот"""
+        try:
+            async with self.session.post(
+                f"{self.bot_url}/api/monitoring/metrics",
+                json=metrics,
+                timeout=10
+            ) as response:
+                if response.status == 200:
+                    print(f"[{datetime.now()}] Метрики отправлены успешно")
+                else:
+                    print(f"[{datetime.now()}] Ошибка отправки: {response.status}")
+        except Exception as e:
+            print(f"[{datetime.now()}] Ошибка отправки метрик: {e}")
+    
+    async def stop(self):
+        """Остановка агента"""
+        if self.session:
+            await self.session.close()
+
+async def main():
+    """Главная функция"""
+    # Настройки
+    BOT_URL = "$BOT_URL"
+    SERVER_NAME = "$SERVER_NAME"
+    
+    agent = MonitoringAgent(BOT_URL, SERVER_NAME)
+    
+    try:
+        await agent.start()
+    except KeyboardInterrupt:
+        print("Остановка агента...")
+        await agent.stop()
+
+if __name__ == "__main__":
+    asyncio.run(main())
+EOF
+
+chmod +x "$MONITORING_AGENT_DIR/monitoring_agent.py"
+log "Агент мониторинга создан"
+
+# Устанавливаем зависимости Python
+log "Установка зависимостей Python..."
+apt install -y python3-pip python3-aiohttp
+pip3 install aiohttp
+
+# Создаем systemd сервис для агента
+log "Создание systemd сервиса для агента..."
+cat > /etc/systemd/system/monitoring-agent.service << 'EOF'
+[Unit]
+Description=Monitoring Agent for VPN Server
+After=network.target node_exporter.service
+Wants=node_exporter.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/opt/monitoring_agent
+ExecStart=/usr/bin/python3 /opt/monitoring_agent/monitoring_agent.py
+Restart=always
+RestartSec=10
+StandardOutput=journal
+StandardError=journal
+
+# Переменные окружения
+Environment=PYTHONUNBUFFERED=1
+Environment=MONITORING_BOT_URL=http://your-bot-server.com
+Environment=SERVER_NAME=NotouchKZ2
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+# Перезагружаем systemd
+systemctl daemon-reload
+
+# Включаем автозапуск агента
+systemctl enable monitoring-agent
+
+# Запускаем агент
+log "Запуск агента мониторинга..."
+systemctl start monitoring-agent
+
+# Проверяем статус агента
+sleep 3
+if systemctl is-active --quiet monitoring-agent; then
+    log "Агент мониторинга успешно запущен"
+else
+    warn "Ошибка запуска агента мониторинга"
+    systemctl status monitoring-agent
+fi
+
 # Вывод информации
 log "Установка завершена успешно!"
 
@@ -271,11 +571,16 @@ echo "• URL метрик: http://localhost:9100/metrics"
 echo "• Статус: $(systemctl is-active node_exporter)"
 echo "• Файрвол: Порт 9100 $FIREWALL_STATUS"
 echo ""
+echo -e "${BLUE}Информация об агенте мониторинга:${NC}"
+echo "• Статус: $(systemctl is-active monitoring-agent)"
+echo "• Директория: $MONITORING_AGENT_DIR"
+echo "• Логи: journalctl -u monitoring-agent -f"
+echo ""
 echo -e "${BLUE}Полезные команды:${NC}"
-echo "• Проверить статус: systemctl status node_exporter"
-echo "• Перезапустить: systemctl restart node_exporter"
-echo "• Остановить: systemctl stop node_exporter"
-echo "• Посмотреть логи: journalctl -u node_exporter -f"
+echo "• Node Exporter статус: systemctl status node_exporter"
+echo "• Агент мониторинга статус: systemctl status monitoring-agent"
+echo "• Перезапустить агент: systemctl restart monitoring-agent"
+echo "• Логи агента: journalctl -u monitoring-agent -f"
 echo "• Проверить метрики: curl http://localhost:9100/metrics"
 echo ""
 echo -e "${BLUE}Для мониторинга в боте используйте:${NC}"
