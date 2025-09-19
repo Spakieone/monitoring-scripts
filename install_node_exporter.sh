@@ -41,6 +41,9 @@ NODE_EXPORTER_URL="https://github.com/prometheus/node_exporter/releases/download
 
 log "Начинаем установку Node Exporter v${NODE_EXPORTER_VERSION}"
 
+# Инициализация переменной
+SKIP_NODE_EXPORTER_INSTALL=false
+
 # Проверка существующей установки
 log "Проверка существующей установки Node Exporter..."
 
