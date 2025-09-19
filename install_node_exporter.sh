@@ -41,40 +41,82 @@ NODE_EXPORTER_URL="https://github.com/prometheus/node_exporter/releases/download
 
 log "Начинаем установку Node Exporter v${NODE_EXPORTER_VERSION}"
 
-# Запрос IP для открытия порта
-echo ""
-echo -e "${BLUE}Настройка файрвола:${NC}"
-echo "Для работы мониторинга нужно открыть порт 9100"
-echo "Выберите вариант:"
-echo "1) Открыть порт для всех IP (0.0.0.0/0)"
-echo "2) Открыть порт для конкретного IP"
-echo "3) Не открывать порт (открыть вручную позже)"
-echo ""
-read -p "Введите номер варианта (1-3): " firewall_choice
+# Проверка существующей установки
+log "Проверка существующей установки Node Exporter..."
 
-case $firewall_choice in
-    1)
-        FIREWALL_IP="0.0.0.0/0"
-        log "Порт 9100 будет открыт для всех IP"
-        ;;
-    2)
-        read -p "Введите IP адрес для открытия порта 9100: " FIREWALL_IP
-        if [[ $FIREWALL_IP =~ ^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$ ]]; then
-            log "Порт 9100 будет открыт для IP: $FIREWALL_IP"
+# Проверяем systemd сервис
+if systemctl is-active --quiet node_exporter 2>/dev/null; then
+    CURRENT_VERSION=$(node_exporter --version 2>/dev/null | grep -oP 'version \K[0-9.]+' | head -1)
+    if [ ! -z "$CURRENT_VERSION" ]; then
+        log "Node Exporter уже установлен (версия: $CURRENT_VERSION)"
+        log "Текущая версия: $CURRENT_VERSION, Целевая версия: $NODE_EXPORTER_VERSION"
+        
+        if [ "$CURRENT_VERSION" = "$NODE_EXPORTER_VERSION" ]; then
+            log "Версия совпадает, пропускаем установку"
+            echo -e "${GREEN}Node Exporter v${CURRENT_VERSION} уже установлен и запущен!${NC}"
+            echo "• Статус: $(systemctl is-active node_exporter)"
+            echo "• URL метрик: http://localhost:9100/metrics"
+            echo "• IP сервера: $(hostname -I | awk '{print $1}')"
+            exit 0
         else
-            error "Неверный формат IP адреса. Используется 0.0.0.0/0"
-            FIREWALL_IP="0.0.0.0/0"
+            log "Версии отличаются, обновляем до v${NODE_EXPORTER_VERSION}"
+            log "Останавливаем текущую версию..."
+            systemctl stop node_exporter
         fi
-        ;;
-    3)
-        FIREWALL_IP="skip"
-        log "Порт 9100 не будет открыт автоматически"
-        ;;
-    *)
-        error "Неверный выбор. Используется вариант 1 (все IP)"
-        FIREWALL_IP="0.0.0.0/0"
-        ;;
-esac
+    else
+        log "Node Exporter запущен, но версия неизвестна, обновляем..."
+        systemctl stop node_exporter
+    fi
+fi
+
+# Проверяем Docker контейнеры
+if command -v docker &> /dev/null; then
+    if docker ps --format "table {{.Names}}" | grep -q "node_exporter\|node-exporter"; then
+        log "Обнаружен Node Exporter в Docker контейнере"
+        log "Остановка Docker контейнера..."
+        docker stop $(docker ps --format "table {{.Names}}" | grep -E "node_exporter|node-exporter" | head -1) 2>/dev/null || true
+    fi
+fi
+
+# Проверяем процесс в системе
+if pgrep -f "node_exporter" > /dev/null; then
+    log "Обнаружен запущенный процесс node_exporter, останавливаем..."
+    pkill -f "node_exporter" || true
+    sleep 2
+    
+    # Проверяем, не запустился ли снова (автозапуск)
+    sleep 3
+    if pgrep -f "node_exporter" > /dev/null; then
+        log "Процесс перезапустился автоматически, ищем источник автозапуска..."
+        
+        # Проверяем cron
+        if crontab -l 2>/dev/null | grep -q "node_exporter"; then
+            log "Найден автозапуск в crontab, отключаем..."
+            crontab -l 2>/dev/null | grep -v "node_exporter" | crontab - 2>/dev/null || true
+        fi
+        
+        # Проверяем systemd timers
+        if systemctl list-timers --all | grep -q "node_exporter"; then
+            log "Найден systemd timer, отключаем..."
+            systemctl disable --now node_exporter.timer 2>/dev/null || true
+        fi
+        
+        # Проверяем другие systemd сервисы
+        for service in $(systemctl list-units --all --type=service | grep -i node_exporter | awk '{print $1}'); do
+            if [ "$service" != "node_exporter.service" ]; then
+                log "Отключаем сервис: $service"
+                systemctl disable --now "$service" 2>/dev/null || true
+            fi
+        done
+        
+        # Останавливаем снова
+        pkill -f "node_exporter" || true
+        sleep 2
+    fi
+fi
+
+# Настройка файрвола - пользователь должен открыть порт вручную
+log "Внимание: Порт 9100 нужно будет открыть вручную после установки"
 
 # Обновление системы
 log "Обновление системы..."
@@ -161,30 +203,28 @@ else
     exit 1
 fi
 
-# Настройка файрвола
-if [ "$FIREWALL_IP" != "skip" ]; then
-    log "Настройка файрвола..."
-    if command -v ufw &> /dev/null; then
-        if [ "$FIREWALL_IP" = "0.0.0.0/0" ]; then
-            ufw allow 9100/tcp
-            log "Порт 9100 открыт в UFW для всех IP"
-        else
-            ufw allow from $FIREWALL_IP to any port 9100
-            log "Порт 9100 открыт в UFW для IP: $FIREWALL_IP"
-        fi
-    elif command -v iptables &> /dev/null; then
-        if [ "$FIREWALL_IP" = "0.0.0.0/0" ]; then
-            iptables -A INPUT -p tcp --dport 9100 -j ACCEPT
-            log "Порт 9100 открыт в iptables для всех IP"
-        else
-            iptables -A INPUT -p tcp -s $FIREWALL_IP --dport 9100 -j ACCEPT
-            log "Порт 9100 открыт в iptables для IP: $FIREWALL_IP"
-        fi
+# Проверка статуса файрвола
+log "Проверка статуса файрвола..."
+FIREWALL_STATUS="неизвестно"
+if command -v ufw &> /dev/null; then
+    if ufw status | grep -q "9100/tcp"; then
+        FIREWALL_STATUS="открыт в UFW"
+        log "Порт 9100 уже открыт в UFW"
     else
-        warn "Файрвол не найден, откройте порт 9100 вручную"
+        FIREWALL_STATUS="закрыт в UFW"
+        log "Порт 9100 закрыт в UFW"
+    fi
+elif command -v iptables &> /dev/null; then
+    if iptables -L INPUT | grep -q "tcp dpt:9100"; then
+        FIREWALL_STATUS="открыт в iptables"
+        log "Порт 9100 уже открыт в iptables"
+    else
+        FIREWALL_STATUS="закрыт в iptables"
+        log "Порт 9100 закрыт в iptables"
     fi
 else
-    log "Пропуск настройки файрвола (выбран вариант 3)"
+    FIREWALL_STATUS="файрвол не найден"
+    log "Файрвол не найден"
 fi
 
 # Проверка работы
@@ -197,6 +237,18 @@ else
     exit 1
 fi
 
+# Финальная проверка автозапуска
+log "Проверка автозапуска..."
+sleep 2
+if pgrep -f "node_exporter" | wc -l | grep -q "^1$"; then
+    log "Только один процесс node_exporter запущен (правильно)"
+else
+    warn "Обнаружено несколько процессов node_exporter, проверьте автозапуск"
+    pgrep -f "node_exporter" | while read pid; do
+        log "PID $pid: $(ps -p $pid -o comm= 2>/dev/null || echo 'неизвестно')"
+    done
+fi
+
 # Очистка временных файлов
 log "Очистка временных файлов..."
 rm -rf /tmp/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64*
@@ -204,6 +256,11 @@ rm -f /tmp/node_exporter-${NODE_EXPORTER_VERSION}.linux-amd64.tar.gz
 
 # Вывод информации
 log "Установка завершена успешно!"
+
+# Проверяем, была ли это обновление
+if [ ! -z "$CURRENT_VERSION" ] && [ "$CURRENT_VERSION" != "$NODE_EXPORTER_VERSION" ]; then
+    log "Обновление с v${CURRENT_VERSION} до v${NODE_EXPORTER_VERSION} завершено"
+fi
 echo ""
 echo -e "${BLUE}Информация о Node Exporter:${NC}"
 echo "• Версия: ${NODE_EXPORTER_VERSION}"
@@ -212,11 +269,7 @@ echo "• Бинарный файл: ${NODE_EXPORTER_BIN}"
 echo "• Порт: 9100"
 echo "• URL метрик: http://localhost:9100/metrics"
 echo "• Статус: $(systemctl is-active node_exporter)"
-if [ "$FIREWALL_IP" != "skip" ]; then
-    echo "• Файрвол: Порт 9100 открыт для $FIREWALL_IP"
-else
-    echo "• Файрвол: Порт 9100 НЕ открыт (откройте вручную)"
-fi
+echo "• Файрвол: Порт 9100 $FIREWALL_STATUS"
 echo ""
 echo -e "${BLUE}Полезные команды:${NC}"
 echo "• Проверить статус: systemctl status node_exporter"
@@ -229,5 +282,15 @@ echo -e "${BLUE}Для мониторинга в боте используйте
 echo "• IP сервера: $(hostname -I | awk '{print $1}')"
 echo "• Порт: 9100"
 echo "• URL: http://$(hostname -I | awk '{print $1}'):9100/metrics"
+echo ""
+# Показываем предупреждение только если порт закрыт
+if [[ "$FIREWALL_STATUS" == *"закрыт"* ]] || [[ "$FIREWALL_STATUS" == "файрвол не найден" ]]; then
+    echo -e "${YELLOW}⚠️  ВАЖНО: Откройте порт 9100 в файрволе!${NC}"
+    echo "• UFW: ufw allow 9100/tcp"
+    echo "• iptables: iptables -A INPUT -p tcp --dport 9100 -j ACCEPT"
+    echo "• Или откройте порт в панели управления сервером"
+else
+    echo -e "${GREEN}✅ Порт 9100 уже открыт в файрволе!${NC}"
+fi
 echo ""
 echo -e "${GREEN}Node Exporter готов к работе!${NC}"
