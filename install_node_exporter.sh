@@ -286,19 +286,29 @@ mkdir -p "$MONITORING_AGENT_DIR"
 # Запрос настроек агента мониторинга
 echo ""
 echo -e "${BLUE}Настройка агента мониторинга:${NC}"
-echo "Введите URL вашего бота (например: http://93.188.206.70:8080)"
-read -p "URL бота: " BOT_URL
+
+# Проверяем, запущен ли скрипт интерактивно
+if [ -t 0 ]; then
+    echo "Введите URL вашего бота (например: http://93.188.206.70:8080)"
+    read -p "URL бота: " BOT_URL
+    
+    # Автоматически определяем имя сервера
+    AUTO_SERVER_NAME=$(hostname)
+    echo "Введите имя сервера (по умолчанию: $AUTO_SERVER_NAME)"
+    read -p "Имя сервера: " SERVER_NAME
+else
+    # Неинтерактивный режим - используем значения по умолчанию
+    BOT_URL="http://your-bot-server.com"
+    AUTO_SERVER_NAME=$(hostname)
+    SERVER_NAME="$AUTO_SERVER_NAME"
+    warn "Неинтерактивный режим, используются значения по умолчанию"
+fi
 
 # Проверяем URL
 if [ -z "$BOT_URL" ]; then
     BOT_URL="http://your-bot-server.com"
     warn "URL бота не указан, используется по умолчанию: $BOT_URL"
 fi
-
-# Автоматически определяем имя сервера
-AUTO_SERVER_NAME=$(hostname)
-echo "Введите имя сервера (по умолчанию: $AUTO_SERVER_NAME)"
-read -p "Имя сервера: " SERVER_NAME
 
 # Проверяем имя сервера
 if [ -z "$SERVER_NAME" ]; then
@@ -526,8 +536,16 @@ log "Агент мониторинга создан"
 
 # Устанавливаем зависимости Python
 log "Установка зависимостей Python..."
-apt install -y python3-pip python3-aiohttp
-pip3 install aiohttp
+apt install -y python3-pip python3-aiohttp python3-venv
+
+# Создаем виртуальное окружение для агента
+log "Создание виртуального окружения..."
+python3 -m venv "$MONITORING_AGENT_DIR/venv"
+source "$MONITORING_AGENT_DIR/venv/bin/activate"
+
+# Устанавливаем зависимости в виртуальное окружение
+log "Установка Python зависимостей в виртуальное окружение..."
+"$MONITORING_AGENT_DIR/venv/bin/pip" install aiohttp
 
 # Создаем systemd сервис для агента
 log "Создание systemd сервиса для агента..."
@@ -542,7 +560,7 @@ Type=simple
 User=root
 Group=root
 WorkingDirectory=/opt/monitoring_agent
-ExecStart=/usr/bin/python3 /opt/monitoring_agent/monitoring_agent.py
+ExecStart=/opt/monitoring_agent/venv/bin/python /opt/monitoring_agent/monitoring_agent.py
 Restart=always
 RestartSec=10
 StandardOutput=journal
