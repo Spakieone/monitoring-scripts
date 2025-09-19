@@ -52,12 +52,8 @@ if systemctl is-active --quiet node_exporter 2>/dev/null; then
         log "Текущая версия: $CURRENT_VERSION, Целевая версия: $NODE_EXPORTER_VERSION"
         
         if [ "$CURRENT_VERSION" = "$NODE_EXPORTER_VERSION" ]; then
-            log "Версия совпадает, пропускаем установку"
-            echo -e "${GREEN}Node Exporter v${CURRENT_VERSION} уже установлен и запущен!${NC}"
-            echo "• Статус: $(systemctl is-active node_exporter)"
-            echo "• URL метрик: http://localhost:9100/metrics"
-            echo "• IP сервера: $(hostname -I | awk '{print $1}')"
-            exit 0
+            log "Версия совпадает, пропускаем установку Node Exporter"
+            log "Продолжаем установку агента мониторинга..."
         else
             log "Версии отличаются, обновляем до v${NODE_EXPORTER_VERSION}"
             log "Останавливаем текущую версию..."
@@ -113,6 +109,22 @@ if pgrep -f "node_exporter" > /dev/null; then
         pkill -f "node_exporter" || true
         sleep 2
     fi
+fi
+
+# Проверяем, что Node Exporter запущен
+if ! systemctl is-active --quiet node_exporter; then
+    log "Запуск Node Exporter..."
+    systemctl start node_exporter
+    sleep 3
+    if systemctl is-active --quiet node_exporter; then
+        log "Node Exporter успешно запущен"
+    else
+        error "Ошибка запуска Node Exporter"
+        systemctl status node_exporter
+        exit 1
+    fi
+else
+    log "Node Exporter уже запущен"
 fi
 
 # Настройка файрвола - пользователь должен открыть порт вручную
